@@ -357,10 +357,13 @@
     return { enPdf, fuera, listaQuitados };
   }
 
+  // Ignores accents and case; every typed word must appear somewhere in the title or SKU
+  const normalizar = (s) => String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
   function coincide(p) {
-    const q = actual.busqueda.trim().toLowerCase();
-    if (!q) return true;
-    return `${p.title} ${p.sku}`.toLowerCase().includes(q);
+    const palabras = normalizar(actual.busqueda).split(/\s+/).filter(Boolean);
+    if (!palabras.length) return true;
+    const texto = normalizar(`${p.title} ${p.sku}`);
+    return palabras.every((w) => texto.includes(w));
   }
 
   function tarjeta(p, { n, boton, extra }) {
