@@ -30,6 +30,7 @@
   const app = document.getElementById('app');
   let catalogos = [];
   let actual = null; // the catalog being edited
+  let gestion = null; // inventory/order settings and the last hourly run (metaobject inventario_ajustes)
 
   // ---------- Admin API ----------
 
@@ -278,10 +279,12 @@
     actual = null;
     document.title = 'Catálogos PDF';
     app.innerHTML = `
+      ${secciones('catalogos')}
       <header class="cabecera">
         <div>
           <h1>Catálogos PDF</h1>
-          <p class="sub">Toca un catálogo para ver sus productos, quitarlos, agregarlos u ordenarlos.</p>
+          <p class="sub">Toca un catálogo para ver sus productos, quitarlos, agregarlos, ordenarlos o ver su historial.</p>
+          ${gestion && gestion.revision ? `<p class="sub">Última revisión automática: <strong>${fechaHora(gestion.revision.fecha)}</strong></p>` : ''}
         </div>
         <div class="acciones">
           <a class="boton" href="shopify://admin/content/metaobjects/entries/catalogo_ajustes" target="_top">Ajustes generales</a>
@@ -333,8 +336,13 @@
     }
   }
 
-  function barraVolver(cat) {
-    return `<nav class="volver"><a href="#/">← Catálogos</a><span>${esc(cat.titulo)}</span></nav>`;
+  function barraVolver(cat, vista = 'productos') {
+    const slug = encodeURIComponent(cat.slug);
+    return `<nav class="volver"><a href="#/">← Catálogos</a><span>${esc(cat.titulo)}</span></nav>
+      <nav class="pestanas pestanas--chicas">
+        <a href="#/${slug}"${vista === 'productos' ? ' aria-current="page"' : ''}>Productos</a>
+        <a href="#/${slug}/historial"${vista === 'historial' ? ' aria-current="page"' : ''}>Historial de cambios</a>
+      </nav>`;
   }
 
   // Splits the products the way the generator will see them
@@ -457,6 +465,231 @@
     }
   }
 
+  // ---------- Gestión: history, inventory rules and photo-less order ----------
+  // The hourly job (GitHub Actions, repo catalogos-paisalandia) does the work; these views show what
+  // it did and change its settings in the metaobject "inventario_ajustes" (entry "general").
+
+  const fechaHora = (iso) => (iso ? new Date(iso).toLocaleString('es-CO', { dateStyle: 'medium', timeStyle: 'short' }) : '—');
+  const pesos = (n) => `$ ${Number(n || 0).toLocaleString('es-CO')}`;
+
+  function secciones(activa) {
+    const item = (id, href, texto) => `<a href="${href}"${activa === id ? ' aria-current="page"' : ''}>${texto}</a>`;
+    return `<nav class="pestanas">${item('catalogos', '#/', 'Catálogos')}${item('inventario', '#/inventario', 'Inventario')}${item('orden', '#/orden', 'Productos sin foto')}</nav>`;
+  }
+
+  async function leerGestion() {
+    const { metaobjectByHandle: m } = await gql(`{ metaobjectByHandle(handle: { type: "inventario_ajustes", handle: "general" }) { id fields { key value } } }`);
+    if (!m) return null;
+    const f = Object.fromEntries(m.fields.map((x) => [x.key, x.value]));
+    let revision = null;
+    try {
+      revision = JSON.parse(f.ultima_revision || 'null');
+    } catch (e) {
+      revision = null;
+    }
+    return {
+      id: m.id,
+      activo: f.activo === 'true',
+      limiteUnd: Number(f.limite_und || 10),
+      limiteDc: Number(f.limite_dc || 3),
+      reactivarAntiguos: f.reactivar_antiguos === 'true',
+      ordenSinFoto: f.orden_sin_foto === 'true',
+      revision,
+    };
+  }
+
+  async function guardarGestion(campos, mensaje) {
+    const fields = Object.entries(campos).map(([key, value]) => ({ key, value: String(value) }));
+    const data = await gql(`mutation($id: ID!, $m: MetaobjectUpdateInput!) { metaobjectUpdate(id: $id, metaobject: $m) { userErrors { field message } } }`, { id: gestion.id, m: { fields } });
+    const err = data.metaobjectUpdate.userErrors[0];
+    if (err) throw new Error(err.message);
+    aviso(mensaje);
+  }
+
+  async function refrescarGestion() {
+    gestion = await leerGestion();
+  }
+
+  // Catalog change history (metaobject "catalogo_historial"), newest first
+  async function pintarHistorialCatalogo(slug) {
+    const cat = catalogos.find((c) => c.slug === slug);
+    if (!cat) return pintarLista();
+    actual = null;
+    document.title = `Historial · ${cat.titulo}`;
+    app.innerHTML = `${barraVolver(cat, 'historial')}<p class="cargando">Cargando historial…</p>`;
+    try {
+      const { metaobjects } = await gql(
+        `query($q: String!) { metaobjects(type: "catalogo_historial", first: 100, sortKey: "updated_at", reverse: true, query: $q) { nodes { fields { key value } } } }`,
+        { q: `fields.catalogo:"${cat.id}"` }
+      );
+      const entradas = metaobjects.nodes
+        .map((m) => Object.fromEntries(m.fields.map((x) => [x.key, x.value])))
+        .sort((a, b) => (b.fecha || '').localeCompare(a.fecha || ''));
+      const lista = (titulo, items, fila) =>
+        items && items.length ? `<details class="cambio__grupo"><summary>${titulo} (${items.length})</summary><ul>${items.map((x) => `<li>${fila(x)}</li>`).join('')}</ul></details>` : '';
+      app.innerHTML = `
+        ${barraVolver(cat, 'historial')}
+        <header class="cabecera"><div>
+          <h1>Historial de ${esc(cat.titulo)}</h1>
+          <p class="sub">Cada vez que el catálogo cambia en la revisión automática (cada hora) queda un registro: qué productos entraron, cuáles salieron y por qué, y qué precios cambiaron. Se guardan los últimos 120 días.</p>
+        </div></header>
+        ${
+          entradas.length
+            ? `<ol class="cambios">${entradas
+                .map((e) => {
+                  let d = {};
+                  try {
+                    d = JSON.parse(e.detalle || '{}');
+                  } catch (err) {
+                    d = {};
+                  }
+                  const chips = [
+                    Number(e.agregados) ? `<span class="chip chip--verde">+${e.agregados} agregados</span>` : '',
+                    Number(e.quitados) ? `<span class="chip chip--rojo">−${e.quitados} quitados</span>` : '',
+                    Number(e.precios) ? `<span class="chip">${e.precios} precios</span>` : '',
+                  ].join('');
+                  return `<li class="cambio">
+                    <div class="cambio__cabeza"><strong>${fechaHora(e.fecha)}</strong><span>${esc(e.total)} productos en el PDF</span></div>
+                    <div class="cambio__chips">${chips || `<span class="chip">${esc(e.resumen)}</span>`}</div>
+                    ${lista('Agregados', d.agregados, (x) => `${esc(x.sku || 's/SKU')} · ${esc(x.nombre)} · ${pesos(x.precio)}`)}
+                    ${lista('Quitados', d.quitados, (x) => `${esc(x.sku || 's/SKU')} · ${esc(x.nombre)} <span class="etiqueta etiqueta--gris">${esc(x.motivo)}</span>`)}
+                    ${lista('Cambios de precio', d.precios, (x) => `${esc(x.sku || 's/SKU')} · ${esc(x.nombre)} · ${pesos(x.antes)} → <strong>${pesos(x.ahora)}</strong>`)}
+                  </li>`;
+                })
+                .join('')}</ol>`
+            : '<p class="vacio">Aún no hay cambios registrados. El historial empieza con la próxima revisión automática.</p>'
+        }`;
+    } catch (e) {
+      app.innerHTML = `${barraVolver(cat, 'historial')}<p class="error">No se pudo leer el historial: ${esc(e.message)}</p>`;
+    }
+  }
+
+  // Inventory rules: settings, what the last run did (or would do) and the change log
+  let filtroInventario = '';
+  async function pintarInventario(despues = null) {
+    actual = null;
+    document.title = 'Inventario · Gestión Paisalandia';
+    if (!despues) app.innerHTML = `${secciones('inventario')}<p class="cargando">Cargando inventario…</p>`;
+    try {
+      await refrescarGestion();
+      if (!gestion) throw new Error('Faltan los ajustes de inventario');
+      const q = filtroInventario ? `fields.accion:${filtroInventario}` : '';
+      const [{ metaobjects }, conteo] = await Promise.all([
+        gql(
+          `query($q: String, $after: String) { metaobjects(type: "inventario_historial", first: 100, after: $after, sortKey: "updated_at", reverse: true, query: $q) { nodes { fields { key value } } pageInfo { hasNextPage endCursor } } }`,
+          { q, after: despues }
+        ),
+        gql(`{ productsCount(query: "status:draft tag:oculto-por-inventario", limit: null) { count } }`),
+      ]);
+      const filas = metaobjects.nodes.map((m) => Object.fromEntries(m.fields.map((x) => [x.key, x.value])));
+      const r = gestion.revision && gestion.revision.inventario;
+      const ejemplos = (titulo, items) =>
+        items && items.length ? `<details class="cambio__grupo"><summary>${titulo}</summary><ul>${items.map((x) => `<li>${esc(x.sku || 's/SKU')} · ${esc(x.titulo)} · inventario ${esc(x.inventario)} (límite ${esc(x.limite)})</li>`).join('')}</ul></details>` : '';
+      app.innerHTML = `
+        ${secciones('inventario')}
+        <header class="cabecera"><div>
+          <h1>Inventario</h1>
+          <p class="sub">Cada hora se ocultan (pasan a borrador) los productos con poco inventario y vuelven a activarse cuando se les ingresa mercancía. Los de docena (DC) se cuentan en docenas.</p>
+        </div></header>
+
+        <section class="tarjeta">
+          <h2>Reglas</h2>
+          <label class="interruptor"><input type="checkbox" id="inv-activo"${gestion.activo ? ' checked' : ''}> <span><strong>Reglas activas</strong><br><small>Apagado: no cambia nada, solo muestra abajo qué haría.</small></span></label>
+          <div class="campos">
+            <label>Ocultar UND y otras unidades con<input type="number" min="0" id="inv-und" value="${gestion.limiteUnd}"><small>unidades o menos</small></label>
+            <label>Ocultar DC (docena) con<input type="number" min="0" id="inv-dc" value="${gestion.limiteDc}"><small>docenas o menos</small></label>
+          </div>
+          <label class="interruptor"><input type="checkbox" id="inv-antiguos"${gestion.reactivarAntiguos ? ' checked' : ''}> <span><strong>Reactivar también borradores antiguos</strong><br><small>Incluye borradores con foto que no ocultó esta app (por ejemplo, los del Flow anterior) cuando su inventario supere el límite.</small></span></label>
+          <button class="boton boton--primario" id="inv-guardar">Guardar reglas</button>
+          <p class="nota">Los cambios se aplican en la próxima revisión automática (máximo 1 hora).</p>
+        </section>
+
+        <section class="tarjeta">
+          <h2>Última revisión ${gestion.revision ? `· ${fechaHora(gestion.revision.fecha)}` : ''}</h2>
+          ${
+            r
+              ? r.activo
+                ? `<p><strong>${r.ocultados}</strong> productos ocultados · <strong>${r.reactivados}</strong> reactivados.</p>`
+                : `<p class="aviso-simulacion">Modo simulación: si activas las reglas, se ocultarían <strong>${r.ocultar}</strong> productos y se reactivarían <strong>${r.reactivar}</strong>${r.antiguos ? `, y <strong>${r.antiguos}</strong> borradores antiguos si activas esa opción` : ''}.</p>
+                   ${ejemplos(`Se ocultarían (${r.ocultar})`, r.ejemplos && r.ejemplos.ocultar)}
+                   ${ejemplos(`Se reactivarían (${r.reactivar})`, r.ejemplos && r.ejemplos.reactivar)}
+                   ${ejemplos(`Borradores antiguos que podrían volver (${r.antiguos})`, r.ejemplos && r.ejemplos.antiguos)}`
+              : '<p class="vacio">Todavía no hay una revisión con estas reglas.</p>'
+          }
+          <p>Ocultos ahora por esta app: <strong>${conteo.productsCount.count}</strong> productos.</p>
+        </section>
+
+        <section>
+          <h2>Historial</h2>
+          <div class="herramientas">
+            <select id="inv-filtro">
+              <option value=""${!filtroInventario ? ' selected' : ''}>Todos los cambios</option>
+              <option value="Ocultado"${filtroInventario === 'Ocultado' ? ' selected' : ''}>Solo ocultados</option>
+              <option value="Reactivado"${filtroInventario === 'Reactivado' ? ' selected' : ''}>Solo reactivados</option>
+            </select>
+          </div>
+          ${
+            filas.length
+              ? `<div class="tabla-envoltura"><table class="tabla"><thead><tr><th>Fecha</th><th>Acción</th><th>Producto</th><th>Inventario</th></tr></thead><tbody>${filas
+                  .map(
+                    (x) => `<tr>
+                      <td>${fechaHora(x.fecha)}</td>
+                      <td><span class="chip ${x.accion === 'Ocultado' ? 'chip--rojo' : 'chip--verde'}">${esc(x.accion)}</span></td>
+                      <td><a href="shopify://admin/products/${numero(x.producto)}" target="_top">${esc(x.titulo)}</a><br><small>${esc(x.sku || '')}</small></td>
+                      <td>${esc(x.inventario)} ${x.unidad === 'DC' ? 'doc.' : 'und.'} <small>(límite ${esc(x.limite)})</small></td>
+                    </tr>`
+                  )
+                  .join('')}</tbody></table></div>
+                 ${metaobjects.pageInfo.hasNextPage ? `<button class="boton" id="inv-mas" data-cursor="${esc(metaobjects.pageInfo.endCursor)}">Ver más antiguos</button>` : ''}`
+              : '<p class="vacio">Aún no hay cambios registrados.</p>'
+          }
+        </section>`;
+    } catch (e) {
+      app.innerHTML = `${secciones('inventario')}<p class="error">No se pudo cargar el inventario: ${esc(e.message)}</p>`;
+    }
+  }
+
+  async function pintarOrden() {
+    actual = null;
+    document.title = 'Productos sin foto · Gestión Paisalandia';
+    app.innerHTML = `${secciones('orden')}<p class="cargando">Cargando…</p>`;
+    try {
+      await refrescarGestion();
+      if (!gestion) throw new Error('Faltan los ajustes');
+      const o = gestion.revision && gestion.revision.orden;
+      app.innerHTML = `
+        ${secciones('orden')}
+        <header class="cabecera"><div>
+          <h1>Productos sin foto al final</h1>
+          <p class="sub">Cada hora, los productos sin foto se mueven al final de todas las colecciones. Las colecciones con orden automático (más nuevos, A-Z, más vendidos, precio) pasan a orden manual, y la app mantiene ese mismo orden con los productos sin foto de últimos.</p>
+        </div></header>
+        <section class="tarjeta">
+          <label class="interruptor"><input type="checkbox" id="orden-activo"${gestion.ordenSinFoto ? ' checked' : ''}> <span><strong>Mover productos sin foto al final</strong><br><small>Apagado: no cambia nada, solo muestra abajo qué haría.</small></span></label>
+          <button class="boton boton--primario" id="orden-guardar">Guardar</button>
+        </section>
+        <section class="tarjeta">
+          <h2>Última revisión ${gestion.revision ? `· ${fechaHora(gestion.revision.fecha)}` : ''}</h2>
+          ${
+            o
+              ? `<p${o.activo ? '' : ' class="aviso-simulacion"'}>${o.activo ? '' : 'Modo simulación: '}${o.movidos} productos ${o.activo ? 'movidos' : 'se moverían'} en ${o.colecciones} colecciones.${
+                  o.pasadasAManual && o.pasadasAManual.length ? ` Colecciones que ${o.activo ? 'pasaron' : 'pasarían'} a orden manual: ${o.pasadasAManual.map(esc).join(', ')}.` : ''
+                }</p>
+                ${
+                  o.detalle && o.detalle.length
+                    ? `<div class="tabla-envoltura"><table class="tabla"><thead><tr><th>Colección</th><th>Sin foto</th><th>Movimientos</th></tr></thead><tbody>${o.detalle
+                        .map((d) => `<tr><td>${esc(d.coleccion)}</td><td>${esc(d.sinFoto)}</td><td>${esc(d.movimientos)}</td></tr>`)
+                        .join('')}</tbody></table></div>`
+                    : '<p>Todas las colecciones ya tienen los productos sin foto al final.</p>'
+                }`
+              : '<p class="vacio">Todavía no hay una revisión.</p>'
+          }
+          <p class="nota">La búsqueda de la tienda y la página «Todos los productos» no se pueden ordenar desde una app; ahí Shopify usa su propio orden.</p>
+        </section>`;
+    } catch (e) {
+      app.innerHTML = `${secciones('orden')}<p class="error">No se pudo cargar: ${esc(e.message)}</p>`;
+    }
+  }
+
   // ---------- Events ----------
 
   app.addEventListener('click', (e) => {
@@ -465,6 +698,27 @@
     const v = e.target.closest('[data-volver]');
     if (v) return volver(v.dataset.volver);
     if (e.target.closest('#agregar')) agregar().catch((err) => aviso(`No se pudo agregar: ${err.message}`, null, true));
+    if (e.target.closest('#inv-guardar')) {
+      const und = Number(document.getElementById('inv-und').value);
+      const dc = Number(document.getElementById('inv-dc').value);
+      if (!(und >= 0) || !(dc >= 0)) return aviso('Los límites deben ser números de 0 en adelante', null, true);
+      guardarGestion(
+        {
+          activo: document.getElementById('inv-activo').checked,
+          limite_und: Math.round(und),
+          limite_dc: Math.round(dc),
+          reactivar_antiguos: document.getElementById('inv-antiguos').checked,
+        },
+        'Reglas guardadas; se aplican en la próxima revisión'
+      ).catch((err) => aviso(`No se pudo guardar: ${err.message}`, null, true));
+    }
+    if (e.target.closest('#orden-guardar')) {
+      guardarGestion({ orden_sin_foto: document.getElementById('orden-activo').checked }, 'Guardado; se aplica en la próxima revisión').catch((err) =>
+        aviso(`No se pudo guardar: ${err.message}`, null, true)
+      );
+    }
+    const mas = e.target.closest('#inv-mas');
+    if (mas) pintarInventario(mas.dataset.cursor);
   });
   app.addEventListener('input', (e) => {
     if (e.target.id === 'buscar' && actual) {
@@ -474,19 +728,27 @@
   });
   app.addEventListener('change', (e) => {
     if (e.target.id === 'orden' && actual) cambiarOrden(ORDENES_LISTA[e.target.selectedIndex]);
+    if (e.target.id === 'inv-filtro') {
+      filtroInventario = e.target.value;
+      pintarInventario();
+    }
   });
 
   function ruta() {
-    const slug = decodeURIComponent(location.hash.replace(/^#\/?/, ''));
-    if (slug) abrirCatalogo(slug);
+    const [slug, sub] = decodeURIComponent(location.hash.replace(/^#\/?/, '')).split('/');
+    if (slug === 'inventario') pintarInventario();
+    else if (slug === 'orden') pintarOrden();
+    else if (slug && sub === 'historial') pintarHistorialCatalogo(slug);
+    else if (slug) abrirCatalogo(slug);
     else pintarLista();
     window.scrollTo(0, 0);
   }
   window.addEventListener('hashchange', ruta);
 
-  leerCatalogos()
-    .then((lista) => {
+  Promise.all([leerCatalogos(), leerGestion().catch(() => null)])
+    .then(([lista, g]) => {
       catalogos = lista;
+      gestion = g;
       ruta();
     })
     .catch((e) => {
