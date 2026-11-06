@@ -433,7 +433,7 @@
           <select id="orden">${ORDENES_LISTA.map((o) => `<option${o === actual.orden ? ' selected' : ''}>${esc(o === 'Como en la colección' && actual.origen !== 'Colección' ? 'Como en la colección (más nuevos)' : o)}</option>`).join('')}</select>
         </label>
       </div>
-      <p class="nota">Los cambios se guardan solos. El PDF se actualiza en la siguiente actualización automática (máximo 1 hora).</p>
+      <p class="nota">Los cambios se guardan solos. En la siguiente actualización automática (máximo 1 hora) se aplican al PDF y también a la colección de la tienda: lo que quites deja de verse en la colección y lo que agregues aparece en ella.</p>
 
       <section>
         <h2>En el PDF <span class="contador">${enPdf.length}</span></h2>
