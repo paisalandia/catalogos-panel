@@ -12,8 +12,9 @@
     'Nombre (A-Z)': (a, b) => a.name.localeCompare(b.name, 'es', { sensitivity: 'base', numeric: true }),
     'Más nuevos primero': (a, b) => b.creado.localeCompare(a.creado),
     'Más antiguos primero': (a, b) => a.creado.localeCompare(b.creado),
-    'Precio: menor a mayor': (a, b) => a.precio - b.precio,
-    'Precio: mayor a menor': (a, b) => b.precio - a.precio,
+    // Same price: newest first
+    'Precio: menor a mayor': (a, b) => a.precio - b.precio || b.creado.localeCompare(a.creado),
+    'Precio: mayor a menor': (a, b) => b.precio - a.precio || b.creado.localeCompare(a.creado),
   };
   const MOTIVOS = { sinFoto: 'Sin foto', sinInventario: 'Sin inventario', inactivo: 'Borrador o no publicado' };
 
@@ -494,6 +495,7 @@
       limiteDc: Number(f.limite_dc || 3),
       reactivarAntiguos: f.reactivar_antiguos === 'true',
       ordenSinFoto: f.orden_sin_foto === 'true',
+      ordenColecciones: f.orden_colecciones || 'Precio: menor a mayor',
       revision,
     };
   }
@@ -661,10 +663,18 @@
         ${secciones('orden')}
         <header class="cabecera"><div>
           <h1>Orden de las colecciones</h1>
-          <p class="sub">Cada hora, todas las colecciones se ordenan con los productos más nuevos primero y los que no tienen foto al final. Los productos ocultos (sin inventario) no se ven en la tienda. Las colecciones quedan en orden manual porque así Shopify deja que la app las ordene.</p>
+          <p class="sub">Cada hora, todas las colecciones se ordenan con el criterio que elijas aquí, y los productos sin foto siempre quedan al final. Los productos ocultos (sin inventario) no se ven en la tienda. Las colecciones quedan en orden manual porque así Shopify deja que la app las ordene.</p>
         </div></header>
         <section class="tarjeta">
-          <label class="interruptor"><input type="checkbox" id="orden-activo"${gestion.ordenSinFoto ? ' checked' : ''}> <span><strong>Ordenar colecciones (más nuevos primero, sin foto al final)</strong><br><small>Apagado: no cambia nada, solo muestra abajo qué haría.</small></span></label>
+          <label class="interruptor"><input type="checkbox" id="orden-activo"${gestion.ordenSinFoto ? ' checked' : ''}> <span><strong>Ordenar colecciones automáticamente</strong><br><small>Apagado: no cambia nada, solo muestra abajo qué haría.</small></span></label>
+          <div class="campos">
+            <label>Orden de las colecciones
+              <select id="orden-criterio">
+                ${['Precio: menor a mayor', 'Más nuevos primero'].map((o) => `<option${o === gestion.ordenColecciones ? ' selected' : ''}>${o}</option>`).join('')}
+              </select>
+              <small>Con «Precio: menor a mayor», a igual precio salen primero los más nuevos.</small>
+            </label>
+          </div>
           <button class="boton boton--primario" id="orden-guardar">Guardar</button>
         </section>
         <section class="tarjeta">
@@ -713,7 +723,7 @@
       ).catch((err) => aviso(`No se pudo guardar: ${err.message}`, null, true));
     }
     if (e.target.closest('#orden-guardar')) {
-      guardarGestion({ orden_sin_foto: document.getElementById('orden-activo').checked }, 'Guardado; se aplica en la próxima revisión').catch((err) =>
+      guardarGestion({ orden_sin_foto: document.getElementById('orden-activo').checked, orden_colecciones: document.getElementById('orden-criterio').value },'Guardado; se aplica en la próxima revisión').catch((err) =>
         aviso(`No se pudo guardar: ${err.message}`, null, true)
       );
     }

@@ -156,3 +156,4 @@ a { color: inherit; }
 .tabla th, .tabla td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--borde); vertical-align: top; }
 .tabla th { background: #f6f7f5; font-weight: 700; }
 .tabla a { font-weight: 600; }
+.campos select { min-height: 38px; padding: 6px 10px; border: 1px solid var(--borde); border-radius: 10px; font: inherit; background: var(--tarjeta); }
