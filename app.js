@@ -474,7 +474,7 @@
 
   function secciones(activa) {
     const item = (id, href, texto) => `<a href="${href}"${activa === id ? ' aria-current="page"' : ''}>${texto}</a>`;
-    return `<nav class="pestanas">${item('catalogos', '#/', 'Catálogos')}${item('inventario', '#/inventario', 'Inventario')}${item('orden', '#/orden', 'Productos sin foto')}</nav>`;
+    return `<nav class="pestanas">${item('catalogos', '#/', 'Catálogos')}${item('inventario', '#/inventario', 'Inventario')}${item('orden', '#/orden', 'Orden de colecciones')}</nav>`;
   }
 
   async function leerGestion() {
@@ -651,7 +651,7 @@
 
   async function pintarOrden() {
     actual = null;
-    document.title = 'Productos sin foto · Gestión Paisalandia';
+    document.title = 'Orden de colecciones · Gestión Paisalandia';
     app.innerHTML = `${secciones('orden')}<p class="cargando">Cargando…</p>`;
     try {
       await refrescarGestion();
@@ -660,11 +660,11 @@
       app.innerHTML = `
         ${secciones('orden')}
         <header class="cabecera"><div>
-          <h1>Productos sin foto al final</h1>
-          <p class="sub">Cada hora, los productos sin foto se mueven al final de todas las colecciones. Las colecciones con orden automático (más nuevos, A-Z, más vendidos, precio) pasan a orden manual, y la app mantiene ese mismo orden con los productos sin foto de últimos.</p>
+          <h1>Orden de las colecciones</h1>
+          <p class="sub">Cada hora, todas las colecciones se ordenan con los productos más nuevos primero y los que no tienen foto al final. Los productos ocultos (sin inventario) no se ven en la tienda. Las colecciones quedan en orden manual porque así Shopify deja que la app las ordene.</p>
         </div></header>
         <section class="tarjeta">
-          <label class="interruptor"><input type="checkbox" id="orden-activo"${gestion.ordenSinFoto ? ' checked' : ''}> <span><strong>Mover productos sin foto al final</strong><br><small>Apagado: no cambia nada, solo muestra abajo qué haría.</small></span></label>
+          <label class="interruptor"><input type="checkbox" id="orden-activo"${gestion.ordenSinFoto ? ' checked' : ''}> <span><strong>Ordenar colecciones (más nuevos primero, sin foto al final)</strong><br><small>Apagado: no cambia nada, solo muestra abajo qué haría.</small></span></label>
           <button class="boton boton--primario" id="orden-guardar">Guardar</button>
         </section>
         <section class="tarjeta">
